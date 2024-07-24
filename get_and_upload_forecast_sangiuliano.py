@@ -7,7 +7,9 @@ import os
 import re
 import json
 import requests
+from zoneinfo import ZoneInfo
 
+currentzone=ZoneInfo("Europe/Rome")
 
 def get_wind_data_today_WG(debug=False):
   headers = {
@@ -73,11 +75,11 @@ def get_wind_data_today_WG(debug=False):
 
 def get_old_data_github_WG(id):
   try:
-    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/predictions/predicted_wind_venice_{datetime.now().month}_{datetime.now().year}_{str(id)}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
+    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/predictions/predicted_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}_{str(id)}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
     df_old['timestamp'] = pd.to_datetime(df_old['timestamp'],format="%Y-%m-%d %H:%M:%S")
     df_old['model_name'] = df_old['model_name'].astype("string")
   except:
-    print(f"File https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/predictions/predicted_wind_venice_{datetime.now().month}_{datetime.now().year}_{str(id)}.csv not found creating a new one")
+    print(f"File https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/predictions/predicted_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}_{str(id)}.csv not found creating a new one")
     df_old=pd.DataFrame()
   return(df_old)
 
@@ -87,7 +89,7 @@ if __name__ == "__main__":
 
   model_data=get_wind_data_today_WG()
 
-  tomorrow = datetime.now() + timedelta(days=1)
+  tomorrow = datetime.now(currentzone) + timedelta(days=1)
   desired_keys = ['WINDSPD','GUST', 'WINDDIR', 'SLP','TMP','TMPE' 'FLHGT',  'RH', 'TCDC', 'APCP', 'APCP1', 'HCDC', 'MCDC', 'LCDC', 'SLHGT', 'PCPT']
 
 
@@ -124,7 +126,7 @@ if __name__ == "__main__":
     if not os.path.exists(directory_path):
       os.makedirs(directory_path)
     
-    df_merged.to_csv(f"./data/predictions/predicted_wind_venice_{datetime.now().month}_{datetime.now().year}_{id}.csv")
+    df_merged.to_csv(f"./data/predictions/predicted_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}_{id}.csv")
     #dfs.append(model_df)
 
   #combined_df = pd.concat(dfs, ignore_index=True)
