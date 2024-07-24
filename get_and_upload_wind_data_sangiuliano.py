@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime
 import requests
 from datetime import datetime, timedelta
-
+import os
 import re
 import json
 import requests
@@ -63,8 +63,8 @@ def process_wind_data(df):
 
 def get_old_data_github():
   try:
-    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
-    print(f"Found old file at path https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv, opening")
+    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
+    print(f"Found old file at path https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv, opening")
     df_old['time_measured'] = pd.to_datetime(df_old['time_measured'],format="%Y-%m-%d %H:%M:%S")
     df_old['wind_direction_measured']=df_old['wind_direction_measured'].astype("string")
   except:
@@ -77,4 +77,10 @@ if __name__ == "__main__":
   df=process_wind_data(df)
   df_old=get_old_data_github()
   df_merged=pd.concat([df_old,df]).drop_duplicates().reset_index(drop=True)
-  df_merged.to_csv(f"measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv")
+  
+  directory_path = "./data/measurements"
+
+  if not os.path.exists(directory_path):
+    os.makedirs(directory_path)
+  
+  df_merged.to_csv(f"./data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv")
