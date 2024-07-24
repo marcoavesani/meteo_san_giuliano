@@ -1,10 +1,10 @@
 name: Daily fetch forecasts
 on:
   schedule:
-    - cron: '59 16 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
+    - cron: '59 14 * * *'  # The time is UTC
   push:
       branches:
-        - master  # Specify the branches you want to trigger the workflow on push
+        - master  
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -16,19 +16,18 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9'  # Specify the Python version you need
+        python-version: '3.9'  # Specify the Python version 
         cache: 'pip' # caching pip dependencies
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt  # Assumes you have a requirements.txt file with your dependencies
+        pip install -r requirements.txt  
         #pip install numpy pandas requests
         
     - name: Run Python script
       run: |
-        python get_and_upload_forecast_sangiuliano.py  # Replace with your script name
-
+        python get_and_upload_forecast_sangiuliano.py  
     - name: Commit and push changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
