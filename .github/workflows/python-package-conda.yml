@@ -5,7 +5,7 @@ on:
     - cron: '0 12 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
   push:
       branches:
-        - main  # Specify the branches you want to trigger the workflow on push
+        - master  # Specify the branches you want to trigger the workflow on push
 jobs:
   run-script:
     runs-on: ubuntu-latest
