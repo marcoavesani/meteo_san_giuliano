@@ -29,7 +29,7 @@ def get_wind_data_today(debug=False):
   extracted_split=extracted.split("},{")
   extracted_split[0]=extracted_split[0][8:]
   extracted_split[-1]=extracted_split[-1][:-19]
-  print(extracted_split[-1])
+  #print(extracted_split[-1])
   array_dict=[json.loads("{"+i+"}") for i in  extracted_split  ]
 
   df=pd.DataFrame(array_dict)
@@ -40,10 +40,10 @@ def process_wind_data(df):
   df = df.drop(columns=['xtmp','ytmp','ygusttmp','x'])
 
   #Get current date in the desired format
-  current_date = datetime.now().strftime('%Y-%m-%d')
+  current_date = datetime.now(currentzone).strftime('%Y-%m-%d')
   # Concatenate current date with time column
   df['t'] = current_date + ' ' + df['t']
-  print(df['t'])
+  print(current_date)
   # Convert 't' column to datetime dtype
   df['t'] = pd.to_datetime(df['t'],format="%Y-%m-%d %H:%M:%S")
   df['dir']=df['dir'].astype("string")
@@ -65,8 +65,8 @@ def process_wind_data(df):
 
 def get_old_data_github():
   try:
-    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
-    print(f"Found old file at path https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv, opening")
+    df_old=pd.read_csv(f"https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}.csv",index_col=[0],parse_dates=True,date_format="%Y-%m-%d %H:%M:%S")
+    print(f"Found old file at path https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/master/data/measurements/measured_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}.csv, opening")
     df_old['time_measured'] = pd.to_datetime(df_old['time_measured'],format="%Y-%m-%d %H:%M:%S")
     df_old['wind_direction_measured']=df_old['wind_direction_measured'].astype("string")
   except:
@@ -85,4 +85,4 @@ if __name__ == "__main__":
   if not os.path.exists(directory_path):
     os.makedirs(directory_path)
   
-  df_merged.to_csv(f"./data/measurements/measured_wind_venice_{datetime.now().month}_{datetime.now().year}.csv")
+  df_merged.to_csv(f"./data/measurements/measured_wind_venice_{datetime.now(currentzone).month}_{datetime.now(currentzone).year}.csv")
