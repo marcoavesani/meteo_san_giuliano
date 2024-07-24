@@ -43,7 +43,7 @@ def process_wind_data(df):
   current_date = datetime.now().strftime('%Y-%m-%d')
   # Concatenate current date with time column
   df['t'] = current_date + ' ' + df['t']
-
+  print(df['t'])
   # Convert 't' column to datetime dtype
   df['t'] = pd.to_datetime(df['t'],format="%Y-%m-%d %H:%M:%S")
   df['dir']=df['dir'].astype("string")
