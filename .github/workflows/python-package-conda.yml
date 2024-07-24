@@ -22,6 +22,7 @@ jobs:
 
     - name: Install dependencies
       run: |
+        rm *.csv
         python -m pip install --upgrade pip
         pip install -r requirements.txt  # Assumes you have a requirements.txt file with your dependencies
         #pip install numpy pandas requests
