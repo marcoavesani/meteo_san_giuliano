@@ -1,5 +1,4 @@
-name: Daily Python Script
-
+name: Daily fetch forecasts
 on:
   schedule:
     - cron: '59 22 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
@@ -29,14 +28,14 @@ jobs:
         
     - name: Run Python script
       run: |
-        python get_and_upload_wind_data_sangiuliano.py  # Replace with your script name
+        python get_and_upload_forecast_sangiuliano,py  # Replace with your script name
 
     - name: Commit and push changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add *.csv  # Replace with the path to your generated CSV file
-        git commit -m "Update generated CSV file"
+        git commit -m "Update generated forecast CSV files"
         git push
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
