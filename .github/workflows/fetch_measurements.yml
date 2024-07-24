@@ -2,10 +2,10 @@ name: Daily fetch measurements
 
 on:
   schedule:
-    - cron: '59 22 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
+    - cron: '59 20 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
   push:
       branches:
-        - master  # Specify the branches you want to trigger the workflow on push
+        - master  
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -24,12 +24,12 @@ jobs:
       run: |
         #rm *.csv
         python -m pip install --upgrade pip
-        pip install -r requirements.txt  # Assumes you have a requirements.txt file with your dependencies
+        pip install -r requirements.txt 
         #pip install numpy pandas requests
         
     - name: Run Python script
       run: |
-        python get_and_upload_wind_data_sangiuliano.py  # Replace with your script name
+        python get_and_upload_wind_data_sangiuliano.py  
 
     - name: Commit and push changes
       run: |
