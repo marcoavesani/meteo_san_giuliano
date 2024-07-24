@@ -1,7 +1,7 @@
 name: Daily fetch forecasts
 on:
   schedule:
-    - cron: '59 22 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
+    - cron: '59 16 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
   push:
       branches:
         - master  # Specify the branches you want to trigger the workflow on push
