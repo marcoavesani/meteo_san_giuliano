@@ -7,7 +7,9 @@ import os
 import re
 import json
 import requests
+from zoneinfo import ZoneInfo
 
+currentzone=ZoneInfo("Europe/Rome")
 def get_wind_data_today(debug=False):
 
   url = 'https://meteo-venezia.net/'
