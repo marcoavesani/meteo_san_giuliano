@@ -27,7 +27,7 @@ jobs:
         
     - name: Run Python script
       run: |
-        python get_and_upload_forecast_sangiuliano,py  # Replace with your script name
+        python get_and_upload_forecast_sangiuliano.py  # Replace with your script name
 
     - name: Commit and push changes
       run: |
