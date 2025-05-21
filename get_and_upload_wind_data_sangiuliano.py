@@ -37,7 +37,33 @@ FINAL_COLUMN_ORDER = [
 
 # --- Functions ---
 
-def get_wind_data_today(debug: bool = False) -> pd.DataFrame:
+def get_wind_data_today(debug=False):
+
+  url = 'https://meteo-venezia.net/'
+
+  html_data = requests.get(url).text
+  #data = re.search(r'dataPoints\s*=\s*\[(.*?)\]', html_data)
+
+  data = re.search(r'dataPoints=\[(.*?) \]', html_data)
+  print(data)
+
+
+  datapoints_loc=html_data.find("dataPoints=")
+  init_sq=html_data[datapoints_loc:].find("[")
+  close_sq=html_data[datapoints_loc:].find("]")
+
+  extracted=html_data[datapoints_loc+init_sq:datapoints_loc+close_sq+1].replace("x:","\"x\":").replace("y:","\"y\":").replace("ygust:","\"ygust\":").replace("dir:","\"dir\":").replace("dirdegree:","\"dirdegree\":").replace("xtmp:","\"xtmp\":").replace("ytmp:","\"ytmp\":").replace("ygusttmp:","\"ygusttmp\":").replace(",t",",\"t\"")
+  extracted_split=extracted.split("},{")
+  extracted_split[0]=extracted_split[0][8:]
+  extracted_split[-1]=extracted_split[-1][:-19]
+  #print(extracted_split[-1])
+  array_dict=[json.loads("{"+i+"}") for i in  extracted_split  ]
+
+  df=pd.DataFrame(array_dict)
+  return(df)
+
+
+def get_wind_data_today2(debug: bool = False) -> pd.DataFrame:
     """
     Scrapes wind data from the meteo-venezia.net website.
     The data is embedded in a JavaScript variable 'dataPoints'.
@@ -50,29 +76,36 @@ def get_wind_data_today(debug: bool = False) -> pd.DataFrame:
         print(f"Error fetching data from {SOURCE_URL}: {e}")
         return pd.DataFrame()
 
+
     # Regex to find the 'dataPoints' array assignment.
     # It looks for 'dataPoints = [...]' and captures the content of the array.
     # re.DOTALL allows '.' to match newlines, in case the array spans multiple lines.
-    match = re.search(r'dataPoints\s*=\s*(\[[\s\S]*?\])\s*;', html_data, re.DOTALL)
-
+    #match = re.search(r'dataPoints\s*=\s*(\[[\s\S]*?\])\s*;', html_data, re.DOTALL)
+    match = re.search(r'dataPoints=\[(.*?) \]', html_data)
     if not match:
         if debug:
             print("Could not find 'dataPoints' array in the HTML content.")
         return pd.DataFrame()
 
     js_array_string = match.group(1)
+    last_bracket = js_array_string.rfind(']')
+    if last_bracket != -1:
+        js_array_string = js_array_string[:last_bracket+1]
     if debug:
         print(f"--- Extracted JavaScript array string (first 200 chars): ---\n{js_array_string[:200]}...")
 
+    json_string = js_array_string
+    print(json_string)
+    
     # Convert the JavaScript-like array string to a valid JSON string:
     # 1. Quote unquoted keys (e.g., x: -> "x":)
     #    This regex looks for patterns like '{key:', ',key:', '[key:'
     #    and adds quotes around the key.
-    json_string = re.sub(r'([{,\[]\s*)(\w+)(\s*:)', r'\1"\2"\3', js_array_string)
+    #json_string = re.sub(r'([{,\[]\s*)(\w+)(\s*:)', r'\1"\2"\3', js_array_string)
 
     # 2. Handle 'new Date(timestamp)' by replacing it with just the timestamp number.
     #    e.g., "x": new Date(1234567890000) -> "x": 1234567890000
-    json_string = re.sub(r'new Date\((\d+)\)', r'\1', json_string)
+    #json_string = re.sub(r'new Date\((\d+)\)', r'\1', json_string)
     
     # 3. Ensure any remaining single quotes around values (if any from odd source formatting) become double quotes
     #    This step might be optional depending on the exact source format variability
