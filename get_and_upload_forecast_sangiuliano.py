@@ -94,6 +94,112 @@ def create_session_with_retries(
     return session
 
 
+def normalize_datetime_column(
+    df: pd.DataFrame,
+    datetime_column: str,
+    source_label: str
+) -> pd.DataFrame:
+    """
+    Ensure the datetime field exists as a regular column, even for legacy CSVs
+    where it may have been serialized as the index.
+
+    Args:
+        df: Raw DataFrame loaded from CSV
+        datetime_column: Expected datetime column name
+        source_label: Label used in logs to identify the source
+
+    Returns:
+        DataFrame with a normalized datetime column
+    """
+    df_normalized = df.copy()
+
+    if datetime_column in df_normalized.columns:
+        df_normalized[datetime_column] = pd.to_datetime(
+            df_normalized[datetime_column],
+            errors='coerce',
+            format="%Y-%m-%d %H:%M:%S"
+        )
+        return df_normalized
+
+    unnamed_columns = [
+        col for col in df_normalized.columns
+        if isinstance(col, str) and col.startswith("Unnamed:")
+    ]
+
+    for candidate_column in unnamed_columns:
+        parsed_candidate = pd.to_datetime(
+            df_normalized[candidate_column],
+            errors='coerce',
+            format="%Y-%m-%d %H:%M:%S"
+        )
+        if parsed_candidate.notna().any():
+            logger.warning(
+                "Recovered '%s' from legacy index column '%s' in %s",
+                datetime_column,
+                candidate_column,
+                source_label
+            )
+            df_normalized[datetime_column] = parsed_candidate
+            df_normalized = df_normalized.drop(columns=[candidate_column])
+            return df_normalized
+
+    parsed_index = pd.to_datetime(
+        pd.Index(df_normalized.index),
+        errors='coerce',
+        format="%Y-%m-%d %H:%M:%S"
+    )
+    if pd.Series(parsed_index).notna().any():
+        logger.warning(
+            "Recovered '%s' from DataFrame index in %s",
+            datetime_column,
+            source_label
+        )
+        df_normalized = df_normalized.reset_index(drop=True)
+        df_normalized[datetime_column] = parsed_index
+        return df_normalized
+
+    logger.error(
+        "Could not find a valid '%s' field in %s. Columns found: %s",
+        datetime_column,
+        source_label,
+        list(df_normalized.columns)
+    )
+    return df_normalized
+
+
+def validate_output_dataframe(df: pd.DataFrame, datetime_column: str) -> bool:
+    """
+    Validate that the output DataFrame can be safely written without losing time.
+
+    Args:
+        df: DataFrame about to be saved
+        datetime_column: Required datetime column name
+
+    Returns:
+        True if safe to save, False otherwise
+    """
+    if datetime_column not in df.columns:
+        logger.error(
+            "Refusing to save data: required datetime column '%s' is missing. "
+            "Current columns: %s",
+            datetime_column,
+            list(df.columns)
+        )
+        return False
+
+    invalid_count = df[datetime_column].isna().sum()
+    if invalid_count > 0:
+        logger.error(
+            "Refusing to save data: column '%s' contains %s invalid datetime values",
+            datetime_column,
+            invalid_count
+        )
+        logger.error("Sample invalid rows:\n%s", df[df[datetime_column].isna()].head(10))
+        return False
+
+    return True
+
+
 # --- Main Functions ---
 
 def get_wind_models_for_spot(spot_id: str, session: requests.Session) -> List[Dict[str, Any]]:
@@ -252,12 +358,8 @@ def fetch_historical_data(model_id: int, current_dt: datetime) -> pd.DataFrame:
     )
     
     try:
-        # Read without index column (files are saved with index=False)
-        df_old = pd.read_csv(
-            file_url,
-            parse_dates=['timestamp'],
-            date_format="%Y-%m-%d %H:%M:%S"
-        )
+        df_old = pd.read_csv(file_url)
+        df_old = normalize_datetime_column(df_old, 'timestamp', file_url)
         
         logger.info(f"Loaded {len(df_old)} historical records for model {model_id}")
         
@@ -396,14 +498,9 @@ def merge_and_deduplicate_forecasts(
     # Merge
     df_merged = pd.concat([df_old, df_new], ignore_index=True)
     
-    # Deduplicate - keep latest forecast for each timestamp
-    dedup_columns = ['timestamp', 'model_id'] + [
-        k for k in DESIRED_FORECAST_KEYS if k in df_merged.columns
-    ]
-    
     initial_count = len(df_merged)
     df_merged = df_merged.drop_duplicates(
-        subset=dedup_columns, 
+        subset=['timestamp', 'model_id'], 
         keep='last'
     ).reset_index(drop=True)
     
@@ -435,9 +532,13 @@ def save_forecast_data(df: pd.DataFrame, model_id: int, current_dt: datetime) ->
     )
     output_path = LOCAL_DATA_DIR / file_name
     
+    df_to_save = normalize_datetime_column(df, 'timestamp', str(output_path))
+    if not validate_output_dataframe(df_to_save, 'timestamp'):
+        raise ValueError("Output validation failed: 'timestamp' is missing or invalid")
+
     # Save without index to match existing file format (index=False)
-    df.to_csv(output_path, index=False)
-    logger.info(f"Saved {len(df)} forecasts for model {model_id} to {output_path.name}")
+    df_to_save.to_csv(output_path, index=False)
+    logger.info(f"Saved {len(df_to_save)} forecasts for model {model_id} to {output_path.name}")
 
 
 def process_and_save_forecasts(
