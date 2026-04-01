@@ -98,6 +98,112 @@ def validate_dataframe_structure(df: pd.DataFrame, required_columns: list) -> bo
     return True
 
 
+def normalize_datetime_column(
+    df: pd.DataFrame,
+    datetime_column: str,
+    source_label: str
+) -> pd.DataFrame:
+    """
+    Ensure the datetime field exists as a regular column, even for legacy CSVs
+    where it may have been serialized as the index.
+
+    Args:
+        df: Raw DataFrame loaded from CSV
+        datetime_column: Expected datetime column name
+        source_label: Label used in logs to identify the source
+
+    Returns:
+        DataFrame with a normalized datetime column
+    """
+    df_normalized = df.copy()
+
+    if datetime_column in df_normalized.columns:
+        df_normalized[datetime_column] = pd.to_datetime(
+            df_normalized[datetime_column],
+            errors='coerce',
+            format="%Y-%m-%d %H:%M:%S"
+        )
+        return df_normalized
+
+    unnamed_columns = [
+        col for col in df_normalized.columns
+        if isinstance(col, str) and col.startswith("Unnamed:")
+    ]
+
+    for candidate_column in unnamed_columns:
+        parsed_candidate = pd.to_datetime(
+            df_normalized[candidate_column],
+            errors='coerce',
+            format="%Y-%m-%d %H:%M:%S"
+        )
+        if parsed_candidate.notna().any():
+            logger.warning(
+                "Recovered '%s' from legacy index column '%s' in %s",
+                datetime_column,
+                candidate_column,
+                source_label
+            )
+            df_normalized[datetime_column] = parsed_candidate
+            df_normalized = df_normalized.drop(columns=[candidate_column])
+            return df_normalized
+
+    parsed_index = pd.to_datetime(
+        pd.Index(df_normalized.index),
+        errors='coerce',
+        format="%Y-%m-%d %H:%M:%S"
+    )
+    if pd.Series(parsed_index).notna().any():
+        logger.warning(
+            "Recovered '%s' from DataFrame index in %s",
+            datetime_column,
+            source_label
+        )
+        df_normalized = df_normalized.reset_index(drop=True)
+        df_normalized[datetime_column] = parsed_index
+        return df_normalized
+
+    logger.error(
+        "Could not find a valid '%s' field in %s. Columns found: %s",
+        datetime_column,
+        source_label,
+        list(df_normalized.columns)
+    )
+    return df_normalized
+
+
+def validate_output_dataframe(df: pd.DataFrame, datetime_column: str) -> bool:
+    """
+    Validate that the output DataFrame can be safely written without losing time.
+
+    Args:
+        df: DataFrame about to be saved
+        datetime_column: Required datetime column name
+
+    Returns:
+        True if safe to save, False otherwise
+    """
+    if datetime_column not in df.columns:
+        logger.error(
+            "Refusing to save data: required datetime column '%s' is missing. "
+            "Current columns: %s",
+            datetime_column,
+            list(df.columns)
+        )
+        return False
+
+    invalid_count = df[datetime_column].isna().sum()
+    if invalid_count > 0:
+        logger.error(
+            "Refusing to save data: column '%s' contains %s invalid datetime values",
+            datetime_column,
+            invalid_count
+        )
+        logger.error("Sample invalid rows:\n%s", df[df[datetime_column].isna()].head(10))
+        return False
+
+    return True
+
+
 # --- Main Functions ---
 
 def scrape_wind_data() -> pd.DataFrame:
@@ -268,11 +374,8 @@ def fetch_historical_data(current_dt: datetime) -> pd.DataFrame:
     )
     
     try:
-        df_old = pd.read_csv(
-            file_url,
-            parse_dates=['time_measured'],
-            date_format="%Y-%m-%d %H:%M:%S"
-        )
+        df_old = pd.read_csv(file_url)
+        df_old = normalize_datetime_column(df_old, 'time_measured', file_url)
         logger.info(f"Loaded historical data from GitHub: {len(df_old)} records")
         
         # Ensure correct dtypes
@@ -354,8 +457,12 @@ def save_data(df: pd.DataFrame, current_dt: datetime) -> None:
         year=current_dt.year
     )
     output_path = LOCAL_DATA_DIR / file_name
-    
-    df.to_csv(output_path, index=False)
+
+    df_to_save = normalize_datetime_column(df, 'time_measured', str(output_path))
+    if not validate_output_dataframe(df_to_save, 'time_measured'):
+        raise ValueError("Output validation failed: 'time_measured' is missing or invalid")
+
+    df_to_save.to_csv(output_path, index=False)
     logger.info(f"Saved {len(df)} records to {output_path}")
 
 
