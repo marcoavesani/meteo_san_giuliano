@@ -2563,3 +2563,5 @@ time_measured,wind_speed_measured,wind_gust_measured,wind_direction_measured,win
 2026-05-17 23:45:00,1.8,3.5,SSE,151
 2026-05-20 00:05:00,3.5,5.2,SW,225
 2026-05-20 00:10:01,2.5,3.5,SW,228
+2026-05-22 00:05:00,0.8,1.8,WSW,245
+2026-05-22 00:10:00,0.8,1.8,WSW,255
