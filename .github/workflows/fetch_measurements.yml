@@ -1,46 +1,44 @@
-name: Daily fetch measurements
+name: Fetch measurements
 
 on:
   schedule:
-    - cron: '59 20 * * *'  # This cron expression schedules the workflow to run every day at 12:00 UTC
-  push:
-      branches:
-        - master  
+    # The station page only shows *today* (local time): anything not saved before
+    # midnight Europe/Rome is lost. Scheduled runs can be delayed by hours, so run
+    # every hour (at an off-peak minute) and let the merge deduplicate.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: data-commit   # shared with fetch_forecasts.yml: never push concurrently
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
 jobs:
-  run-script:
+  fetch:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'  # Specify the Python version you need
-        cache: 'pip' # caching pip dependencies
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        #rm *.csv
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt 
-        #pip install numpy pandas requests
-        
-    - name: Run Python script
-      run: |
-        python get_and_upload_wind_data_sangiuliano.py  
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-    - name: Commit and push changes
-      run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
-        if [ -n "$(git status --porcelain)" ]; then
-          git add *.csv
-          git commit -m "Update generated measured CSV file"
+      - name: Fetch measurements
+        run: python get_and_upload_wind_data_sangiuliano.py
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/measurements
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -m "Update measurements $(TZ=Europe/Rome date '+%Y-%m-%d %H:%M')"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
           git push
-        else
-          echo "No changes to commit"
-        fi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

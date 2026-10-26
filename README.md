@@ -1,92 +1,83 @@
 # Meteo San Giuliano
 
-This repository contains scripts and workflows for fetching, processing, and storing weather data for San Giuliano. The data includes both measurements and predictions, which are stored in various formats for different use cases.
+Daily collection of wind **measurements** from the Polo Nautico station
+(meteo-venezia.net, Venice – San Giuliano) and of next-day **forecasts** from all
+Windguru models available for spot [536155](https://www.windguru.cz/536155),
+to compare forecasts against observations.
 
-## Directory Structure
+## Data
 
-- `.github/workflows`: Contains GitHub Actions workflows for automating data fetching and processing.
-  - `fetch_forecasts.yml`: Fetches weather forecasts and uploads them to the repository.
-  - `fetch_measurements.yml`: Fetches weather measurements and uploads them to the repository.
-- `data`: Contains subdirectories for measurements and predictions.
-  - `measurements`: Stores weather measurements in CSV, JSON, and SQLite formats.
-    - `measurements.csv`: CSV file with weather measurements.
-    - `measurements.json`: JSON file with weather measurements.
-    - `measurements.sqlite`: SQLite database with weather measurements.
-    - `README.md`: Instructions on how to use the measurements data.
-  - `predictions`: Stores weather predictions in CSV and JSON formats.
-    - `predictions.csv`: CSV file with weather predictions.
-    - `predictions.json`: JSON file with weather predictions.
-    - `README.md`: Instructions on how to use the predictions data.
-- `get_and_upload_wind_data_sangiuliano.py`: Script for fetching and processing wind data measurements.
-- `get_and_upload_forecast_sangiuliano.py`: Script for fetching and processing wind data forecasts.
-- `requirements.txt`: Lists the Python dependencies required to run the scripts.
+### `data/measurements/measured_wind_venice_{month}_{year}.csv`
 
-## GitHub Actions Workflows
+One file per calendar month, 5-minute samples, sorted by time, no duplicates.
 
-### Fetch Forecasts
+| column | unit / format |
+|---|---|
+| `time_measured` | `YYYY-MM-DD HH:MM:SS`, **local time Europe/Rome** (naive; ambiguous during the DST fall-back hour) |
+| `wind_speed_measured` | as shown on the station page (knots) |
+| `wind_gust_measured` | as above |
+| `wind_direction_measured` | 16-point compass (`N`, `NNE`, …) |
+| `wind_direction_degree_measured` | degrees, integer; empty if unknown |
 
-The `fetch_forecasts.yml` workflow is triggered by a scheduled cron job or a push to the master branch. It performs the following steps:
+### `data/predictions/predicted_wind_venice_{month}_{year}_{model_id}.csv`
 
-1. Checks out the repository code.
-2. Sets up the Python environment.
-3. Installs dependencies.
-4. Runs the Python script to fetch weather forecasts.
-5. Commits and pushes the generated CSV files to the repository.
+One file per calendar month **of the forecast timestamp** and per model.
+Each day the latest available run is saved for the following day (00–23 UTC).
 
-### Fetch Measurements
+| column | unit / format |
+|---|---|
+| `timestamp` | `YYYY-MM-DD HH:MM:SS`, **UTC** (naive) |
+| `WINDSPD`, `GUST`, `WINDDIR`, `SLP`, `TMP`, `TMPE`, `FLHGT`, `RH`, `TCDC`, `APCP`, `APCP1`, `HCDC`, `MCDC`, `LCDC`, `SLHGT`, `PCPT` | Windguru variables as returned by the API (wind in knots, direction in degrees, `SLP` hPa, `TMP` °C, `RH`/cloud cover %) |
+| `model_name`, `model_id` | Windguru model |
+| `init_time` | model run (UTC); lead time = `timestamp - init_time`. Empty for data collected before Oct 2026 |
 
-The `fetch_measurements.yml` workflow runs daily at 12:00 UTC and performs the following steps:
+All atmospheric models share this exact header; variables a model does not
+provide are empty. The wave model (GFS-Wave, id 84) has its own header with
+`HTSGW, PERPW, DIRPW, WVHGT, WVPER, WVDIR, SWELL1, SWPER1, SWDIR1, SWELL2, SWPER2, SWDIR2`
+in place of the atmospheric variables.
 
-1. Checks out the repository code.
-2. Sets up the Python environment.
-3. Installs dependencies.
-4. Runs the Python script to fetch weather measurements.
-5. Commits and pushes the generated CSV files to the repository.
+**Time zones:** to align forecasts with measurements convert one of the two, e.g.
 
-## Data Files
+```python
+m["time_utc"] = (m.time_measured.dt.tz_localize("Europe/Rome", ambiguous="NaT", nonexistent="NaT")
+                 .dt.tz_convert("UTC").dt.tz_localize(None))
+```
 
-### Measurements
+### Known gaps
 
-- `measurements.csv`: Contains columns for `timestamp`, `location`, `temperature`, `humidity`, `pressure`, and `wind_speed`.
-- `measurements.json`: JSON format of the measurements data.
-- `measurements.sqlite`: SQLite database containing the measurements data.
-
-### Predictions
-
-- `predictions.csv`: Contains columns for `id`, `prediction`, and `probability`.
-- `predictions.json`: JSON format of the predictions data.
+* The station page only shows the current day: before October 2026 the
+  measurement job ran once a day late in the evening and lost everything after
+  the run; from late August 2026 the scheduled run was being delayed past
+  midnight, so most days only contain 00:00–02:00. The job now runs hourly.
+* Night-time gaps in 2024–early 2025 come from the station itself.
 
 ## Scripts
 
-### `get_and_upload_wind_data_sangiuliano.py`
+* `get_and_upload_wind_data_sangiuliano.py` – scrapes the station page and merges into the monthly file.
+* `get_and_upload_forecast_sangiuliano.py` – downloads all Windguru models and merges tomorrow's forecast.
+* `meteo_common.py` – schema, normalisation and safe read/merge/write shared by both.
+* `tools/rebuild_from_git_history.py` – rebuilds every CSV from all committed
+  versions (recovers rows lost by past bugs and normalises the format).
 
-This script fetches wind data from a specified URL, processes it, and stores it in a CSV file. The script performs the following steps:
+Safety rules: existing data are read from the local checkout; a file that
+exists but cannot be parsed aborts the run; a write that would reduce the number
+of rows or contain invalid/duplicated timestamps is refused; files are written
+atomically; any failure exits non-zero so the GitHub Action is marked failed.
 
-1. Fetches wind data from the URL.
-2. Processes the data to extract relevant information.
-3. Merges the new data with existing data from the repository.
-4. Saves the merged data to a CSV file in the `data/measurements` directory.
+## Automation (`.github/workflows`)
 
-### `get_and_upload_forecast_sangiuliano.py`
+* `fetch_measurements.yml` – every hour (`:23`).
+* `fetch_forecasts.yml` – daily at 14:47 UTC.
+* `tests.yml` – `pytest` on code changes (unit tests + integrity check of every CSV).
 
-This script fetches wind data forecasts from Windguru, processes them, and stores them in CSV files. The script performs the following steps:
+Both fetch workflows share a concurrency group so they never push at the same time,
+and can be started manually (`workflow_dispatch`).
 
-1. Fetches wind data forecasts from Windguru.
-2. Processes the data to extract relevant information.
-3. Merges the new data with existing data from the repository.
-4. Saves the merged data to CSV files in the `data/predictions` directory.
+## Local use
 
-## Requirements
-
-The required Python packages are listed in the `requirements.txt` file:
-`
-numpy==2.0.1 pandas==2.2.2 Requests==2.32.3
-`
-
-## Usage
-
-1. Clone the repository.
-2. Install the required Python packages using `pip install -r requirements.txt`.
-3. Run the scripts to fetch and process weather data.
-
-For more detailed instructions, refer to the README files in the `data/measurements` and `data/predictions` directories.
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python get_and_upload_wind_data_sangiuliano.py
+python get_and_upload_forecast_sangiuliano.py
+pytest -q
+```

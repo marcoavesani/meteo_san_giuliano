@@ -1,628 +1,143 @@
 """
-Wind Forecast Data Fetcher for Venice from Windguru
-Fetches forecast models and predictions, merges with historical data.
+Wind forecast fetcher for Venice (Windguru spot 536155).
+
+For every model offered on the spot, keeps the forecast for *tomorrow*
+(00:00-23:00 UTC of the day after the run date, as in the historical data) from
+the latest available run and merges it into
+data/predictions/predicted_wind_venice_{month}_{year}_{model_id}.csv, where
+month/year are those of the forecast timestamp.
+
+Timestamps are UTC (Windguru ``initdate`` is UTC); ``init_time`` is the model
+run used, so the lead time is ``timestamp - init_time``.
 """
-import json
+from __future__ import annotations
+
 import logging
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
+import sys
+from datetime import date, datetime, timedelta
 from time import sleep
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- Configuration ---
-TIMEZONE = ZoneInfo("Europe/Rome")
-SPOT_ID = '536155'
-BASE_IAPI_URL = 'https://www.windguru.cz/int/iapi.php'
-FORECAST_IAPI_URL = 'https://www.windguru.net/int/iapi.php'
-REQUEST_TIMEOUT = 15  # seconds
-INTER_REQUEST_DELAY = 0.5  # seconds between requests to be polite
+import meteo_common as mc
 
-# Headers - Define base headers and update as needed
-BASE_HEADERS = {
-    'Accept': '*/*',
-    'Accept-Language': 'it-IT,it;q=0.5',
-    'Connection': 'keep-alive',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-GPC': '1',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'sec-ch-ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
+SPOT_ID = "536155"
+SPOT_IAPI_URL = "https://www.windguru.cz/int/iapi.php"
+FORECAST_IAPI_URL = "https://www.windguru.net/int/iapi.php"
+REQUEST_TIMEOUT = 20
+INTER_REQUEST_DELAY = 0.5
+# Abort (non-zero exit) if fewer models than this could be saved
+MIN_MODELS_OK = 5
+
+HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "it-IT,it;q=0.5",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    "Referer": f"https://www.windguru.cz/{SPOT_ID}",
 }
 
-# Data paths
-GITHUB_DATA_URL_TEMPLATE = (
-    "https://raw.githubusercontent.com/marcoavesani/meteo_san_giuliano/"
-    "master/data/predictions/predicted_wind_venice_{month}_{year}_{id}.csv"
-)
-LOCAL_DATA_DIR = Path("./data/predictions")
-LOCAL_DATA_FILE_TEMPLATE = "predicted_wind_venice_{month}_{year}_{id}.csv"
-
-# Desired forecast data keys (some may be missing in responses)
-DESIRED_FORECAST_KEYS = [
-    'WINDSPD', 'GUST', 'WINDDIR', 'SLP', 'TMP', 'TMPE', 'FLHGT', 'RH',
-    'TCDC', 'APCP', 'APCP1', 'HCDC', 'MCDC', 'LCDC', 'SLHGT', 'PCPT'
-]
-
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions ---
 
-def create_session_with_retries(
-    retries: int = 3,
-    backoff_factor: float = 0.5,
-    status_forcelist: tuple = (500, 502, 503, 504)
-) -> requests.Session:
-    """
-    Create a requests session with automatic retry logic.
-    
-    Args:
-        retries: Number of retry attempts
-        backoff_factor: Delay factor between retries
-        status_forcelist: HTTP status codes that trigger a retry
-        
-    Returns:
-        Configured requests.Session object
-    """
+def make_session() -> requests.Session:
     session = requests.Session()
-    retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
+    retry = Retry(total=4, backoff_factor=1.0,
+                  status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",))
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.headers.update(HEADERS)
     return session
 
 
-def normalize_datetime_column(
-    df: pd.DataFrame,
-    datetime_column: str,
-    source_label: str
-) -> pd.DataFrame:
-    """
-    Ensure the datetime field exists as a regular column, even for legacy CSVs
-    where it may have been serialized as the index.
-
-    Args:
-        df: Raw DataFrame loaded from CSV
-        datetime_column: Expected datetime column name
-        source_label: Label used in logs to identify the source
-
-    Returns:
-        DataFrame with a normalized datetime column
-    """
-    df_normalized = df.copy()
-
-    if datetime_column in df_normalized.columns:
-        df_normalized[datetime_column] = pd.to_datetime(
-            df_normalized[datetime_column],
-            errors='coerce',
-            format="%Y-%m-%d %H:%M:%S"
-        )
-        return df_normalized
-
-    unnamed_columns = [
-        col for col in df_normalized.columns
-        if isinstance(col, str) and col.startswith("Unnamed:")
-    ]
-
-    for candidate_column in unnamed_columns:
-        parsed_candidate = pd.to_datetime(
-            df_normalized[candidate_column],
-            errors='coerce',
-            format="%Y-%m-%d %H:%M:%S"
-        )
-        if parsed_candidate.notna().any():
-            logger.warning(
-                "Recovered '%s' from legacy index column '%s' in %s",
-                datetime_column,
-                candidate_column,
-                source_label
-            )
-            df_normalized[datetime_column] = parsed_candidate
-            df_normalized = df_normalized.drop(columns=[candidate_column])
-            return df_normalized
-
-    parsed_index = pd.to_datetime(
-        pd.Index(df_normalized.index),
-        errors='coerce',
-        format="%Y-%m-%d %H:%M:%S"
-    )
-    if pd.Series(parsed_index).notna().any():
-        logger.warning(
-            "Recovered '%s' from DataFrame index in %s",
-            datetime_column,
-            source_label
-        )
-        df_normalized = df_normalized.reset_index(drop=True)
-        df_normalized[datetime_column] = parsed_index
-        return df_normalized
-
-    logger.error(
-        "Could not find a valid '%s' field in %s. Columns found: %s",
-        datetime_column,
-        source_label,
-        list(df_normalized.columns)
-    )
-    return df_normalized
+def get_models(session: requests.Session) -> List[Dict[str, Any]]:
+    resp = session.get(SPOT_IAPI_URL, params={"q": "forecast_spot", "id_spot": SPOT_ID},
+                       timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    models = resp.json()["tabs"][0]["id_model_arr"]
+    logger.info("Found %s forecast models", len(models))
+    return models
 
 
-def validate_output_dataframe(df: pd.DataFrame, datetime_column: str) -> bool:
-    """
-    Validate that the output DataFrame can be safely written without losing time.
-
-    Args:
-        df: DataFrame about to be saved
-        datetime_column: Required datetime column name
-
-    Returns:
-        True if safe to save, False otherwise
-    """
-    if datetime_column not in df.columns:
-        logger.error(
-            "Refusing to save data: required datetime column '%s' is missing. "
-            "Current columns: %s",
-            datetime_column,
-            list(df.columns)
-        )
-        return False
-
-    invalid_count = df[datetime_column].isna().sum()
-    if invalid_count > 0:
-        logger.error(
-            "Refusing to save data: column '%s' contains %s invalid datetime values",
-            datetime_column,
-            invalid_count
-        )
-        logger.error("Sample invalid rows:\n%s", df[df[datetime_column].isna()].head(10))
-        return False
-
-    return True
-
-
-# --- Main Functions ---
-
-def get_wind_models_for_spot(spot_id: str, session: requests.Session) -> List[Dict[str, Any]]:
-    """
-    Fetches the list of available forecast models for a given spot.
-    
-    Args:
-        spot_id: Windguru spot ID
-        session: Requests session with retry logic
-        
-    Returns:
-        List of model configuration dictionaries
-    """
-    headers = {
-        **BASE_HEADERS,
-        'Referer': f'https://www.windguru.cz/{spot_id}',
-    }
-    params = {
-        'q': 'forecast_spot',
-        'id_spot': spot_id,
-    }
-    
+def get_forecast(session: requests.Session, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    params = {"q": "forecast", "id_spot": SPOT_ID, "id_model": cfg["id_model"],
+              "rundef": cfg["rundef"], "initstr": cfg["initstr"], "cachefix": cfg["cachefix"]}
     try:
-        response = session.get(
-            BASE_IAPI_URL, 
-            params=params, 
-            headers=headers, 
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        data = response.json()
-        
-        logger.debug("Successfully fetched spot forecast models")
-        
-        id_model_arr = data.get("tabs", [{}])[0].get("id_model_arr", [])
-        logger.info(f"Found {len(id_model_arr)} forecast models for spot {spot_id}")
-        return id_model_arr
-        
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching wind models for spot {spot_id}")
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching wind models: {e}")
-        return []
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        logger.error(f"Error parsing wind models response: {e}")
-        return []
-
-
-def get_forecast_data_for_model(
-    model_config: Dict[str, Any], 
-    spot_id: str, 
-    session: requests.Session
-) -> Optional[Dict[str, Any]]:
-    """
-    Fetches detailed forecast data for a specific model configuration.
-    
-    Args:
-        model_config: Model configuration dictionary with id_model, rundef, etc.
-        spot_id: Windguru spot ID
-        session: Requests session with retry logic
-        
-    Returns:
-        Forecast data dictionary or None if fetch fails
-    """
-    headers = {
-        'sec-ch-ua': BASE_HEADERS['sec-ch-ua'],
-        'Referer': 'https://www.windguru.cz/',
-        'sec-ch-ua-mobile': BASE_HEADERS['sec-ch-ua-mobile'],
-        'User-Agent': BASE_HEADERS['User-Agent'],
-        'sec-ch-ua-platform': BASE_HEADERS['sec-ch-ua-platform'],
-    }
-    params = {
-        'q': 'forecast',
-        'id_model': model_config["id_model"],
-        'rundef': model_config["rundef"],
-        'initstr': model_config["initstr"],
-        'id_spot': spot_id,
-        'cachefix': model_config["cachefix"],
-    }
-    
-    model_id = model_config.get("id_model", "Unknown")
-    
-    try:
-        response = session.get(
-            FORECAST_IAPI_URL, 
-            params=params, 
-            headers=headers, 
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        data = response.json()
-        logger.debug(f"Successfully fetched forecast data for model {model_id}")
-        return data
-        
-    except requests.exceptions.Timeout:
-        logger.warning(f"Timeout fetching forecast for model {model_id}")
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Error fetching forecast for model {model_id}: {e}")
-    except json.JSONDecodeError as e:
-        logger.warning(f"Error parsing forecast data for model {model_id}: {e}")
-    
-    return None
-
-
-def fetch_all_forecasts(spot_id: str) -> List[Dict[str, Any]]:
-    """
-    Orchestrates fetching all model forecasts for a spot.
-    
-    Args:
-        spot_id: Windguru spot ID
-        
-    Returns:
-        List of forecast data dictionaries from all models
-    """
-    session = create_session_with_retries()
-    
-    model_configs = get_wind_models_for_spot(spot_id, session)
-    if not model_configs:
-        logger.warning("No model configurations found")
-        return []
-
-    wind_data_per_model = []
-    total_models = len(model_configs)
-    
-    for idx, config in enumerate(model_configs, 1):
-        logger.info(f"Fetching model {idx}/{total_models}: {config.get('id_model', 'Unknown')}")
-        
-        forecast_data = get_forecast_data_for_model(config, spot_id, session)
-        if forecast_data:
-            wind_data_per_model.append(forecast_data)
-        
-        # Be polite to the server - add small delay between requests
-        if idx < total_models:
-            sleep(INTER_REQUEST_DELAY)
-    
-    logger.info(f"Successfully fetched data for {len(wind_data_per_model)}/{total_models} models")
-    return wind_data_per_model
-
-
-def fetch_historical_data(model_id: int, current_dt: datetime) -> pd.DataFrame:
-    """
-    Fetches previously predicted data for a model from GitHub.
-    
-    Args:
-        model_id: Model ID number
-        current_dt: Current datetime with timezone
-        
-    Returns:
-        DataFrame with historical predictions or empty DataFrame if not found
-    """
-    file_url = GITHUB_DATA_URL_TEMPLATE.format(
-        month=current_dt.month,
-        year=current_dt.year,
-        id=model_id
-    )
-    
-    try:
-        df_old = pd.read_csv(file_url)
-        df_old = normalize_datetime_column(df_old, 'timestamp', file_url)
-        
-        logger.info(f"Loaded {len(df_old)} historical records for model {model_id}")
-        
-        # Ensure correct dtypes
-        if 'timestamp' in df_old.columns:
-            if not pd.api.types.is_datetime64_any_dtype(df_old['timestamp']):
-                df_old['timestamp'] = pd.to_datetime(
-                    df_old['timestamp'], 
-                    format="%Y-%m-%d %H:%M:%S"
-                )
-        
-        if 'model_name' in df_old.columns:
-            df_old['model_name'] = df_old['model_name'].astype(pd.StringDtype())
-        
-        return df_old
-        
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            logger.info(f"No historical file found for model {model_id} (404)")
-        else:
-            logger.warning(f"HTTP error fetching historical data for model {model_id}: {e}")
-    except pd.errors.EmptyDataError:
-        logger.warning(f"Historical file is empty for model {model_id}")
-    except Exception as e:
-        logger.warning(f"Error reading historical data for model {model_id}: {e}")
-    
-    return pd.DataFrame()
-
-
-def extract_forecast_dataframe(
-    model_output: Dict[str, Any], 
-    target_date: datetime.date
-) -> Optional[pd.DataFrame]:
-    """
-    Extract and transform forecast data into a DataFrame for a specific date.
-    
-    Args:
-        model_output: Raw model forecast data from API
-        target_date: Date to filter forecasts for
-        
-    Returns:
-        DataFrame with forecasts for target date, or None if extraction fails
-    """
-    fcst_data = model_output.get("fcst")
-    wgmodel_data = model_output.get("wgmodel")
-    
-    if not fcst_data or not wgmodel_data:
-        logger.warning("Missing 'fcst' or 'wgmodel' data in model output")
+        resp = session.get(FORECAST_IAPI_URL, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Model %s: download failed: %s", cfg.get("id_model"), exc)
         return None
-    
-    model_id = wgmodel_data.get('id_model', 'Unknown')
-    model_name = wgmodel_data.get('model_longname', 'Unknown')
-    
-    try:
-        # Parse initialization time
-        init_date_str = fcst_data["initdate"]
-        time_local_init = datetime.strptime(init_date_str, "%Y-%m-%d %H:%M:%S")
-        
-        # Get forecast hours
-        model_hours = fcst_data.get("hours", [])
-        if not model_hours:
-            logger.warning(f"No hours data for model {model_id}")
-            return None
-        
-        # Create timestamps
-        timestamps = [time_local_init + timedelta(hours=h) for h in model_hours]
-        
-        # Build DataFrame with available forecast keys
-        data_for_df = {"timestamp": timestamps}
-        missing_keys = []
-        
-        for key in DESIRED_FORECAST_KEYS:
-            if key in fcst_data:
-                if len(fcst_data[key]) == len(timestamps):
-                    data_for_df[key] = fcst_data[key]
-                else:
-                    logger.warning(
-                        f"Length mismatch for '{key}' in model {model_id}: "
-                        f"expected {len(timestamps)}, got {len(fcst_data[key])}"
-                    )
-                    data_for_df[key] = [np.nan] * len(timestamps)
-            else:
-                missing_keys.append(key)
-        
-        if missing_keys:
-            logger.debug(f"Model {model_id} missing keys: {', '.join(missing_keys)}")
-        
-        # Create DataFrame
-        full_model_df = pd.DataFrame(data_for_df)
-        
-        # Filter for target date
-        model_df_filtered = full_model_df[
-            full_model_df["timestamp"].dt.date == target_date
-        ].copy()
-        
-        if model_df_filtered.empty:
-            logger.debug(f"No data for {target_date} in model {model_name}")
-            return None
-        
-        # Add model metadata
-        model_df_filtered["model_name"] = model_name
-        model_df_filtered["model_id"] = model_id
-        model_df_filtered["model_name"] = model_df_filtered["model_name"].astype(pd.StringDtype())
-        
-        logger.info(f"Extracted {len(model_df_filtered)} forecasts for model {model_id} ({model_name})")
-        return model_df_filtered
-        
-    except KeyError as e:
-        logger.error(f"KeyError processing model {model_id}: {e}")
-    except ValueError as e:
-        logger.error(f"ValueError processing model {model_id}: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error processing model {model_id}: {e}")
-    
-    return None
 
 
-def merge_and_deduplicate_forecasts(
-    df_old: pd.DataFrame, 
-    df_new: pd.DataFrame
-) -> pd.DataFrame:
+def forecast_to_dataframe(payload: Dict[str, Any], target_date: date) -> pd.DataFrame:
     """
-    Merge old and new forecast data, removing duplicates.
-    
-    Args:
-        df_old: Historical forecast DataFrame
-        df_new: New forecast DataFrame
-        
-    Returns:
-        Merged and deduplicated DataFrame
+    Convert a Windguru forecast payload into rows whose UTC date is ``target_date``.
     """
-    # Align columns
-    if not df_old.empty:
-        df_old = df_old.reindex(columns=df_new.columns)
-    
-    # Merge
-    df_merged = pd.concat([df_old, df_new], ignore_index=True)
-    
-    initial_count = len(df_merged)
-    df_merged = df_merged.drop_duplicates(
-        subset=['timestamp', 'model_id'], 
-        keep='last'
-    ).reset_index(drop=True)
-    
-    duplicates_removed = initial_count - len(df_merged)
-    if duplicates_removed > 0:
-        logger.debug(f"Removed {duplicates_removed} duplicate forecasts")
-    
-    # Sort by timestamp
-    df_merged = df_merged.sort_values(by="timestamp").reset_index(drop=True)
-    
-    return df_merged
+    fcst, model = payload.get("fcst") or {}, payload.get("wgmodel") or {}
+    hours = fcst.get("hours") or []
+    if not hours or "initdate" not in fcst:
+        return pd.DataFrame()
+
+    init_utc = datetime.strptime(fcst["initdate"], mc.DATETIME_FORMAT)
+    times_utc = pd.DatetimeIndex([init_utc + timedelta(hours=h) for h in hours])
+
+    data = {mc.FORECAST_TIME: times_utc}
+    for key in mc.ALL_FORECAST_KEYS:
+        values = fcst.get(key)
+        if values is not None and len(values) == len(hours):
+            data[key] = values
+        elif values is not None:
+            logger.warning("Model %s: length mismatch for %s", model.get("id_model"), key)
+    df = pd.DataFrame(data)
+    df["model_name"] = model.get("model_longname") or fcst.get("model_longname")
+    df["model_id"] = model.get("id_model") or fcst.get("id_model")
+    df["init_time"] = init_utc
+    df = df[times_utc.date == target_date]
+    return mc.normalize_forecasts(df)
 
 
-def save_forecast_data(df: pd.DataFrame, model_id: int, current_dt: datetime) -> None:
-    """
-    Save forecast DataFrame to CSV file.
-    
-    Args:
-        df: DataFrame to save
-        model_id: Model ID for filename
-        current_dt: Current datetime for filename
-    """
-    LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    
-    file_name = LOCAL_DATA_FILE_TEMPLATE.format(
-        month=current_dt.month,
-        year=current_dt.year,
-        id=model_id
-    )
-    output_path = LOCAL_DATA_DIR / file_name
-    
-    df_to_save = normalize_datetime_column(df, 'timestamp', str(output_path))
-    if not validate_output_dataframe(df_to_save, 'timestamp'):
-        raise ValueError("Output validation failed: 'timestamp' is missing or invalid")
+def main() -> int:
+    now = datetime.now(mc.TIMEZONE)
+    tomorrow = (now + timedelta(days=1)).date()
+    logger.info("Now %s, collecting forecasts for %s (UTC hours)", now.isoformat(), tomorrow)
 
-    # Save without index to match existing file format (index=False)
-    df_to_save.to_csv(output_path, index=False)
-    logger.info(f"Saved {len(df_to_save)} forecasts for model {model_id} to {output_path.name}")
-
-
-def process_and_save_forecasts(
-    model_data_list: List[Dict[str, Any]], 
-    current_dt: datetime
-) -> None:
-    """
-    Process raw model data, filter for tomorrow, merge with historical data, and save.
-    
-    Args:
-        model_data_list: List of raw forecast data from all models
-        current_dt: Current datetime with timezone
-    """
-    if not model_data_list:
-        logger.warning("No model data to process")
-        return
-
-    tomorrow_date = (current_dt + timedelta(days=1)).date()
-    logger.info(f"Processing forecasts for {tomorrow_date}")
-    
-    LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    
-    processed_count = 0
-
-    for model_output in model_data_list:
-        # Extract forecast DataFrame for tomorrow
-        df_new = extract_forecast_dataframe(model_output, tomorrow_date)
-        
-        if df_new is None or df_new.empty:
+    session = make_session()
+    models = get_models(session)
+    saved, failed = 0, []
+    for i, cfg in enumerate(models):
+        if i:
+            sleep(INTER_REQUEST_DELAY)
+        model_id = cfg.get("id_model")
+        payload = get_forecast(session, cfg)
+        df = forecast_to_dataframe(payload, tomorrow) if payload else pd.DataFrame()
+        if df.empty:
+            failed.append(model_id)
             continue
-        
-        # Get model ID
-        model_id = int(df_new['model_id'].iloc[0])
-        
-        # Fetch historical data
-        df_old = fetch_historical_data(model_id, current_dt)
-        
-        # Align columns if historical data exists
-        if df_old.empty:
-            df_old = pd.DataFrame(columns=df_new.columns)
-        
-        # Merge and deduplicate
-        df_merged = merge_and_deduplicate_forecasts(df_old, df_new)
-        
-        # Save to file
-        save_forecast_data(df_merged, model_id, current_dt)
-        processed_count += 1
-    
-    logger.info(f"Successfully processed and saved {processed_count} model forecasts")
+        # Files are bucketed by the month of the forecast timestamp
+        ts = df[mc.FORECAST_TIME]
+        for (year, month), part in df.groupby([ts.dt.year, ts.dt.month]):
+            path = mc.forecast_path(year, month, int(model_id))
+            mc.upsert(path, part, mc.normalize_forecasts, mc.FORECAST_KEY)
+        saved += 1
 
-
-# --- Main Execution ---
-
-def main():
-    """Main execution function."""
-    logger.info("=" * 70)
-    logger.info("Starting Wind Forecast Collection Script")
-    logger.info("=" * 70)
-    
-    current_datetime = datetime.now(TIMEZONE)
-    logger.info(f"Current time: {current_datetime}")
-    logger.info(f"Forecast target: {(current_datetime + timedelta(days=1)).date()}")
-    
-    # Step 1: Fetch all forecast models
-    logger.info("Step 1: Fetching forecast models from Windguru...")
-    raw_model_data_list = fetch_all_forecasts(SPOT_ID)
-    
-    if not raw_model_data_list:
-        logger.error("Could not fetch any forecast data. Exiting.")
-        return
-    
-    # Step 2: Process and save forecasts
-    logger.info("Step 2: Processing and saving forecast data...")
-    process_and_save_forecasts(raw_model_data_list, current_datetime)
-    
-    logger.info("=" * 70)
-    logger.info("Script completed successfully!")
-    logger.info("=" * 70)
+    logger.info("Saved %s/%s models; without data: %s", saved, len(models), failed)
+    if saved < min(MIN_MODELS_OK, len(models)):
+        logger.error("Too few models saved")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Script interrupted by user")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        sys.exit(main())
+    except Exception:  # make the GitHub Action fail visibly
+        logger.exception("Forecast collection failed")
+        sys.exit(1)
